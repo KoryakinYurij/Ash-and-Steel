@@ -1,0 +1,6 @@
+{
+  "name": "Пепел и Сталь: Экстракция",
+  "description": "Двумерный экшен-рогалик с эвакуацией в стиле тёмного фэнтези: пиксельная графика 16x16, процедурная добыча, кузница улучшений и битвы в подземельях.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
