@@ -7,8 +7,21 @@ import { SoundManager } from './SoundManager';
 import { SpriteFactory, SpriteKey } from './SpriteFactory';
 import { PixelFxKey } from './PixelFxRegistry';
 import { ActivePixelFxAnimation, PixelFxRenderer } from './PixelFxRenderer';
+import {
+  EllipticalObstacle,
+  TallOccludingStructure,
+  checkProjectileObstacleHit,
+  computeDepthZ,
+  computeWeaponHandTransform,
+  resolveEllipticalCollider,
+  selectFloorTileKey,
+  selectPerimeterWallTile,
+  shouldOccludeFade,
+  toPerspectiveRy,
+} from './Perspective34';
 
 interface PuppetActor {
+  spriteKey: SpriteKey;
   root: Container;
   shadow: Graphics;
   bodyWrap: Container;
@@ -26,7 +39,9 @@ interface PuppetActor {
   knockVy: number;
   facing: 1 | -1;
   walkDist: number;
+  idleTime: number;
   baseScale: number;
+  weaponBaseScale: number;
   hitFlashTimer: number;
   swingTimer: number;
   swingDuration: number;
@@ -132,6 +147,17 @@ interface StationTrigger {
   root: Container;
   ring: Graphics;
   sprite: Sprite;
+  upperWrap: Container;
+  occludeStructure: TallOccludingStructure;
+}
+
+interface DungeonPillarInstance {
+  id: string;
+  x: number;
+  y: number;
+  root: Container;
+  upperColumn: Container;
+  structure: TallOccludingStructure;
 }
 
 export class GameEngine {
@@ -162,10 +188,12 @@ export class GameEngine {
   private afterimageAccum = 0;
   private playerInvulnTimer = 0;
 
-  // Hub props
+  // Hub & World 3/4 props
   private stations: StationTrigger[] = [];
   private trainingDummy: PuppetActor | null = null;
   private torches: TorchLightProp[] = [];
+  private pillars: DungeonPillarInstance[] = [];
+  private obstacles: EllipticalObstacle[] = [];
 
   // Dungeon Wave & Entities
   private activeMode: 'hub' | 'dungeon' = 'hub';
@@ -315,29 +343,37 @@ export class GameEngine {
 
   private createPlayerPuppet(): void {
     const root = new Container();
+    root.sortableChildren = true;
+
     const shadow = new Graphics();
-    shadow.ellipse(0, 20, 16, 7).fill({ color: 0x000000, alpha: 0.55 });
+    shadow.ellipse(0, 21, 16, 7).fill({ color: 0x000000, alpha: 0.58 });
+    shadow.zIndex = 0;
     root.addChild(shadow);
 
     const bodyWrap = new Container();
-    const sprite = new Sprite(SpriteFactory.getTexture('player_knight'));
-    sprite.anchor.set(0.5, 0.5);
-    const baseScale = 3.4;
+    bodyWrap.zIndex = 2;
+    const sprite = new Sprite(SpriteFactory.getActorFrameTexture('player_knight', 'idle', 0));
+    // Anchor at (0.5, 0.56) so the 16x22 Knight's boots rest firmly on the ground shadow at y = +21
+    sprite.anchor.set(0.5, 0.56);
+    const baseScale = 3.15;
     sprite.scale.set(baseScale);
     bodyWrap.addChild(sprite);
     root.addChild(bodyWrap);
 
     const weaponPivot = new Container();
-    weaponPivot.position.set(6, 4);
+    weaponPivot.zIndex = 3;
+    weaponPivot.position.set(8, 3);
     const weaponSprite = new Sprite(SpriteFactory.getTexture('weapon_broadsword'));
     weaponSprite.anchor.set(0.2, 0.8);
-    weaponSprite.scale.set(3.0);
+    const weaponBaseScale = 3.0;
+    weaponSprite.scale.set(weaponBaseScale);
     weaponPivot.addChild(weaponSprite);
     root.addChild(weaponPivot);
 
     this.actorLayer.addChild(root);
 
     this.player = {
+      spriteKey: 'player_knight',
       root,
       shadow,
       bodyWrap,
@@ -352,7 +388,9 @@ export class GameEngine {
       knockVy: 0,
       facing: 1,
       walkDist: 0,
+      idleTime: 0,
       baseScale,
+      weaponBaseScale,
       hitFlashTimer: 0,
       swingTimer: 0,
       swingDuration: 0.2,
@@ -388,6 +426,22 @@ export class GameEngine {
       this.trainingDummy = null;
     }
 
+    for (const st of this.stations) {
+      st.root.destroy({ children: true });
+    }
+    this.stations = [];
+
+    for (const t of this.torches) {
+      t.root.destroy({ children: true });
+    }
+    this.torches = [];
+
+    for (const p of this.pillars) {
+      p.root.destroy({ children: true });
+    }
+    this.pillars = [];
+    this.obstacles = [];
+
     for (const fx of this.oneShotPixelFx) {
       fx.sprite.destroy();
     }
@@ -396,8 +450,6 @@ export class GameEngine {
 
     this.projectiles = [];
     this.groundDrops = [];
-    this.stations = [];
-    this.torches = [];
     this.extractionStation = null;
   }
 
@@ -485,13 +537,11 @@ export class GameEngine {
     const startX = -halfW;
     const startY = -halfH;
 
-    const floorKeys: SpriteKey[] = ['floor_1', 'floor_2', 'floor_3', 'floor_moss'];
-
-    // 3/4 Top-Down Room Architecture:
-    // r = -2 is the top wall cap ('wall_top')
-    // r = -1 is the vertical front-facing North masonry wall ('wall_brick')
+    // 3/4 Top-Down Room Architecture with 9-Slice Mitered Parapet Framing:
+    // r = -2 is the top wall cap ('wall_top') + mitered top corners ('wall_corner_tl', 'wall_corner_tr')
+    // r = -1 is the vertical front-facing North masonry wall ('wall_brick') framed by vertical side parapets
     // r = 0..rows-1, c = 0..cols-1 is the foreshortened stone flagstone floor
-    // Left, right, and bottom perimeter borders are thick stone parapet caps ('wall_top')
+    // Left, right, and bottom perimeter borders use dedicated vertical side parapets and south ledge caps
     for (let r = -2; r <= rows; r++) {
       for (let c = -1; c <= cols; c++) {
         const tx = startX + c * tileSize;
@@ -499,22 +549,13 @@ export class GameEngine {
         const isBorder = r < 0 || r === rows || c === -1 || c === cols;
 
         if (isBorder) {
-          const isVerticalNorthFace = r === -1 && c >= 0 && c < cols;
-          const wallKey: SpriteKey = isVerticalNorthFace ? 'wall_brick' : 'wall_top';
+          const wallKey: SpriteKey = selectPerimeterWallTile(r, c, rows, cols);
           const wallSprite = new Sprite(SpriteFactory.getTexture(wallKey));
           wallSprite.position.set(tx, ty);
           wallSprite.scale.set(3);
           this.floorLayer.addChild(wallSprite);
         } else {
-          const hash = Math.abs((r * 73 + c * 37) % 10);
-          const key =
-            hash === 0
-              ? 'floor_moss'
-              : hash < 4
-              ? 'floor_2'
-              : hash === 5
-              ? 'floor_3'
-              : floorKeys[0];
+          const key = selectFloorTileKey(r, c, rows, cols, isHub);
           const tile = new Sprite(SpriteFactory.getTexture(key));
           tile.position.set(tx, ty);
           tile.scale.set(3);
@@ -529,6 +570,9 @@ export class GameEngine {
     const totalFloorH = rows * tileSize;
     wallShadow.rect(startX, startY, totalFloorW, 20).fill({ color: 0x020408, alpha: 0.58 });
     wallShadow.rect(startX, startY + 20, totalFloorW, 10).fill({ color: 0x020408, alpha: 0.25 });
+    // Vertical corner ambient occlusion on the North brick wall (r = -1) where it meets the side parapets
+    wallShadow.rect(startX, startY - tileSize, 16, tileSize).fill({ color: 0x020408, alpha: 0.48 });
+    wallShadow.rect(startX + totalFloorW - 16, startY - tileSize, 16, tileSize).fill({ color: 0x020408, alpha: 0.48 });
     // Subtle inner perimeter ambient occlusion along side and bottom walls
     wallShadow.rect(startX, startY, 12, totalFloorH).fill({ color: 0x020408, alpha: 0.35 });
     wallShadow.rect(startX + totalFloorW - 12, startY, 12, totalFloorH).fill({ color: 0x020408, alpha: 0.35 });
@@ -614,7 +658,9 @@ export class GameEngine {
     floorBrazierCoords.forEach(([x, y], idx) => {
       const root = new Container();
       root.position.set(x, y);
-      root.zIndex = y;
+      // Unified Y-sorting on actorLayer by the brazier's stone plinth ground contact line
+      const groundContactY = y + 6;
+      root.zIndex = computeDepthZ(groundContactY);
 
       // Stepped 3/4 circular stone plinth under the iron tripod legs
       const plinth = new Graphics();
@@ -640,8 +686,15 @@ export class GameEngine {
         phaseOffset: (idx + 2) * 0.53,
       });
 
-      this.propLayer.addChild(root);
+      this.actorLayer.addChild(root);
       this.torches.push({ root, glow, sprite, phase: (idx + 3) * 1.1 });
+      this.obstacles.push({
+        id: `brazier_${idx}`,
+        x,
+        y: groundContactY - 2,
+        rx: 18,
+        ry: 8,
+      });
     });
   }
 
@@ -706,11 +759,11 @@ export class GameEngine {
   }): StationTrigger {
     const root = new Container();
     root.position.set(cfg.x, cfg.y);
-    root.zIndex = cfg.y;
+    const isPortalFx = cfg.id === 'portal' || cfg.id === 'extraction';
+    const groundContactY = cfg.y + (isPortalFx ? 16 : 19);
+    root.zIndex = computeDepthZ(groundContactY);
     root.eventMode = 'static';
     root.cursor = 'pointer';
-
-    const isPortalFx = cfg.id === 'portal' || cfg.id === 'extraction';
 
     // 1. Stepped 3/4 Stone Pedestal (Plinth) + Ground Contact Shadow so the station sits firmly on the floor
     const pedestal = new Graphics();
@@ -749,12 +802,13 @@ export class GameEngine {
     }
     root.addChild(ring);
 
-    // 3. Station Sprite / Portal Vortex anchored onto the pedestal top plane
+    // 3. Upper Station Sprite / Portal Vortex wrapped so it can smoothly fade when occluding an actor behind it
+    const upperWrap = new Container();
     let sprite: Sprite;
     if (isPortalFx) {
       const fxKey: PixelFxKey =
         cfg.id === 'portal' ? 'loop_portal_dungeon' : 'loop_portal_extraction';
-      sprite = this.attachLoopingPixelFx(fxKey, root, {
+      sprite = this.attachLoopingPixelFx(fxKey, upperWrap, {
         x: 0,
         y: -12,
         scale: 1.45,
@@ -764,8 +818,9 @@ export class GameEngine {
       sprite.anchor.set(0.5, 0.5);
       sprite.position.set(0, -4);
       sprite.scale.set(3.8);
-      root.addChild(sprite);
+      upperWrap.addChild(sprite);
     }
+    root.addChild(upperWrap);
 
     const titleStyle = new TextStyle({
       fontFamily: 'Manrope, sans-serif',
@@ -798,7 +853,26 @@ export class GameEngine {
       this.activateStation(cfg.id);
     });
 
-    this.propLayer.addChild(root);
+    // Add to unified Y-sorted actorLayer so actors walking behind stations are properly occluded
+    this.actorLayer.addChild(root);
+
+    // Register solid 3/4 elliptical pedestal footprint collider slightly behind the front zIndex baseline
+    if (cfg.id !== 'extraction') {
+      this.obstacles.push({
+        id: `station_${cfg.id}`,
+        x: cfg.x,
+        y: cfg.y + 6,
+        rx: isPortalFx ? 36 : 35,
+        ry: isPortalFx ? 15 : 15,
+      });
+    }
+
+    const occludeStructure: TallOccludingStructure = {
+      x: cfg.x,
+      baseY: groundContactY,
+      occludeHalfW: isPortalFx ? 46 : 38,
+      occludeHeight: isPortalFx ? 82 : 60,
+    };
 
     const trigger: StationTrigger = {
       id: cfg.id,
@@ -810,6 +884,8 @@ export class GameEngine {
       root,
       ring,
       sprite,
+      upperWrap,
+      occludeStructure,
     };
     this.stations.push(trigger);
     return trigger;
@@ -818,7 +894,7 @@ export class GameEngine {
   private createTrainingDummy(x: number, y: number): void {
     const root = new Container();
     root.position.set(x, y);
-    root.zIndex = y;
+    root.zIndex = computeDepthZ(y + 18);
 
     const shadow = new Graphics();
     // Grounded 3/4 stone/wood stand shadow beneath the training dummy post
@@ -828,6 +904,14 @@ export class GameEngine {
       .fill({ color: 0x262f40 })
       .stroke({ color: 0x475569, width: 1, alpha: 0.65 });
     root.addChild(shadow);
+
+    this.obstacles.push({
+      id: 'training_dummy',
+      x,
+      y: y + 18,
+      rx: 15,
+      ry: 7,
+    });
 
     const bodyWrap = new Container();
     const sprite = new Sprite(SpriteFactory.getTexture('training_dummy'));
@@ -858,6 +942,7 @@ export class GameEngine {
     this.actorLayer.addChild(root);
 
     this.trainingDummy = {
+      spriteKey: 'training_dummy',
       root,
       shadow,
       bodyWrap,
@@ -872,7 +957,9 @@ export class GameEngine {
       knockVy: 0,
       facing: 1,
       walkDist: 0,
+      idleTime: 0,
       baseScale: 3.4,
+      weaponBaseScale: 1,
       hitFlashTimer: 0,
       swingTimer: 0,
       swingDuration: 0.2,
@@ -886,6 +973,17 @@ export class GameEngine {
     this.activeMode = 'dungeon';
     this.activeWave = wave;
     this.buildArenaTiles(540, 360, false);
+
+    // Build 4 tactical 3/4 stone pillars inside the catacomb hall for depth occlusion & projectile cover
+    const pillarCoords: [string, number, number][] = [
+      ['pillar_nw', -224, -92],
+      ['pillar_ne', 224, -92],
+      ['pillar_sw', -224, 108],
+      ['pillar_se', 224, 108],
+    ];
+    for (const [id, px, py] of pillarCoords) {
+      this.createDungeonPillar(id, px, py);
+    }
 
     this.player.x = 0;
     this.player.y = 0;
@@ -910,6 +1008,66 @@ export class GameEngine {
     }
   }
 
+  private createDungeonPillar(id: string, x: number, y: number): void {
+    const root = new Container();
+    root.position.set(x, y);
+    // Sort threshold at the front edge of the stone plinth so actors behind/beside the upper shaft sort behind it
+    const groundContactY = y + 22;
+    root.zIndex = computeDepthZ(groundContactY);
+
+    // 1. Grounded 3/4 stone plinth + directional ambient cast shadow
+    const baseGraphics = new Graphics();
+    // Cast shadow to south-east
+    baseGraphics.ellipse(8, 21, 36, 15.5).fill({ color: 0x020408, alpha: 0.62 });
+    // Stepped 3/4 stone pedestal under pillar
+    baseGraphics.ellipse(0, 18, 30, 13).fill({ color: 0x131722 });
+    baseGraphics
+      .ellipse(0, 13, 30, 12.5)
+      .fill({ color: 0x252e40 })
+      .stroke({ color: 0x64748b, width: 1.2, alpha: 0.72 });
+    // Subtle warm ward glow on floor around the rune pillar
+    baseGraphics.ellipse(0, 15, 38, 16).fill({ color: 0xf59e0b, alpha: 0.07 });
+    root.addChild(baseGraphics);
+
+    // 2. Seamless 1-piece 16x32 monolithic 3/4 stone column + capital (zero mid-shaft black seam!)
+    const upperColumn = new Container();
+    const pillarSprite = new Sprite(SpriteFactory.getTexture('dungeon_pillar'));
+    pillarSprite.anchor.set(0.5, 0.84);
+    pillarSprite.position.set(0, 14);
+    pillarSprite.scale.set(3.5);
+    upperColumn.addChild(pillarSprite);
+
+    root.addChild(upperColumn);
+    this.actorLayer.addChild(root);
+
+    const structure: TallOccludingStructure = {
+      x,
+      baseY: groundContactY,
+      occludeHalfW: 38,
+      occludeHeight: 96,
+    };
+
+    this.pillars.push({
+      id,
+      x,
+      y,
+      root,
+      upperColumn,
+      structure,
+    });
+
+    this.obstacles.push({
+      id,
+      x,
+      y: y + 4,
+      rx: 29,
+      ry: 14,
+      blocksProjectiles: true,
+      projectileRadius: 22,
+      projectileYOffset: -10,
+    });
+  }
+
   private spawnWaveEnemy(wave: number, forceElite = false): void {
     if (this.waveEnemiesSpawned >= this.waveEnemiesTotal) return;
     const comp = getWaveComposition(wave);
@@ -930,51 +1088,63 @@ export class GameEngine {
     }
 
     const def = ENEMY_DEFINITIONS[archetypeId];
-    // Choose a spawn position safely away from the player
+    // Choose a spawn position safely away from the player and outside any stone pillars
     let sx = 0;
     let sy = 0;
-    for (let attempt = 0; attempt < 10; attempt++) {
+    for (let attempt = 0; attempt < 14; attempt++) {
       const angle = Math.random() * Math.PI * 2;
       const dist = 240 + Math.random() * 180;
       sx = Math.max(-this.arenaHalfW + 48, Math.min(this.arenaHalfW - 48, this.player.x + Math.cos(angle) * dist));
       sy = Math.max(-this.arenaHalfH + 48, Math.min(this.arenaHalfH - 48, this.player.y + Math.sin(angle) * dist));
-      if (Math.hypot(sx - this.player.x, sy - this.player.y) > 170) break;
+      const farFromPlayer = Math.hypot(sx - this.player.x, sy - this.player.y) > 170;
+      const clearOfObstacles = this.obstacles.every(
+        (obs) => Math.hypot(sx - obs.x, sy - obs.y) > obs.rx + 28
+      );
+      if (farFromPlayer && clearOfObstacles) break;
     }
 
     const root = new Container();
+    root.sortableChildren = true;
     root.position.set(sx, sy);
 
     const telegraphGraphic = new Graphics();
+    telegraphGraphic.zIndex = -1;
     root.addChild(telegraphGraphic);
 
     const shadow = new Graphics();
+    shadow.zIndex = 0;
     const shadowRx = def.isElite ? 22 : 15;
     shadow.ellipse(0, 20, shadowRx, 7).fill({ color: 0x000000, alpha: 0.55 });
     root.addChild(shadow);
 
     const bodyWrap = new Container();
-    const sprite = new Sprite(SpriteFactory.getTexture(archetypeId));
-    sprite.anchor.set(0.5, 0.5);
+    bodyWrap.zIndex = 2;
+    const sprite = new Sprite(SpriteFactory.getActorFrameTexture(archetypeId, 'idle', 0));
+    sprite.anchor.set(0.5, 0.54);
     sprite.scale.set(def.scale);
     bodyWrap.addChild(sprite);
     root.addChild(bodyWrap);
 
     const weaponPivot = new Container();
-    weaponPivot.position.set(6, 4);
+    weaponPivot.zIndex = 3;
+    weaponPivot.position.set(8, 3);
     const weaponSprite = new Sprite(SpriteFactory.getTexture(`weapon_${def.weaponSprite}` as SpriteKey));
     weaponSprite.anchor.set(0.2, 0.8);
-    weaponSprite.scale.set(def.isElite ? 3.4 : 2.6);
+    const weaponBaseScale = def.isElite ? 3.4 : 2.6;
+    weaponSprite.scale.set(weaponBaseScale);
     weaponPivot.addChild(weaponSprite);
     root.addChild(weaponPivot);
 
     // Health bar above enemy
     const hpBarBg = new Graphics();
+    hpBarBg.zIndex = 4;
     const barW = def.isElite ? 48 : 32;
-    hpBarBg.roundRect(-barW / 2, -32, barW, 5, 2).fill({ color: 0x090a0f, alpha: 0.85 });
+    hpBarBg.roundRect(-barW / 2, -34, barW, 5, 2).fill({ color: 0x090a0f, alpha: 0.85 });
     root.addChild(hpBarBg);
 
     const hpBarFill = new Graphics();
-    hpBarFill.roundRect(-barW / 2 + 1, -31, barW - 2, 3, 1).fill({
+    hpBarFill.zIndex = 5;
+    hpBarFill.roundRect(-barW / 2 + 1, -33, barW - 2, 3, 1).fill({
       color: def.isElite ? 0xfbbf24 : 0xef4444,
     });
     root.addChild(hpBarFill);
@@ -987,6 +1157,7 @@ export class GameEngine {
     this.enemies.push({
       uid: `enemy_${Date.now()}_${Math.random()}`,
       archetypeId,
+      spriteKey: archetypeId,
       root,
       shadow,
       bodyWrap,
@@ -1004,7 +1175,9 @@ export class GameEngine {
       knockVy: 0,
       facing: 1,
       walkDist: 0,
+      idleTime: Math.random() * 4,
       baseScale: def.scale,
+      weaponBaseScale,
       hitFlashTimer: 0,
       swingTimer: 0,
       swingDuration: 0.24,
@@ -1531,9 +1704,13 @@ export class GameEngine {
         : 'loot_chest';
     }
 
-    glow.circle(0, 0, cfg.type === 'item' ? 22 : 13).fill({ color: glowColor, alpha: 0.22 });
+    // 3/4 Perspective-foreshortened ground drop shadow + aura ellipse on the stone floor
+    const auraRx = cfg.type === 'item' ? 24 : 15;
+    const auraRy = toPerspectiveRy(auraRx);
+    glow.ellipse(0, 9, auraRx * 0.72, toPerspectiveRy(auraRx * 0.72)).fill({ color: 0x020408, alpha: 0.55 });
+    glow.ellipse(0, 7, auraRx, auraRy).fill({ color: glowColor, alpha: 0.24 });
     if (cfg.type === 'item') {
-      glow.circle(0, 0, 22).stroke({ color: glowColor, width: 1.5, alpha: 0.75 });
+      glow.ellipse(0, 7, auraRx, auraRy).stroke({ color: glowColor, width: 1.5, alpha: 0.78 });
     }
     root.addChild(glow);
 
@@ -1740,6 +1917,7 @@ export class GameEngine {
     }
 
     this.updateStationProximity(store);
+    this.updateOcclusionFade(dt);
     this.updateEffects(dt);
     this.updateCamera(dt);
   }
@@ -1819,6 +1997,15 @@ export class GameEngine {
     this.player.knockVx *= Math.pow(0.001, dt);
     this.player.knockVy *= Math.pow(0.001, dt);
 
+    // Resolve smooth 3/4 elliptical collisions against pedestals, braziers, and dungeon pillars
+    for (const obs of this.obstacles) {
+      const resolved = resolveEllipticalCollider(this.player.x, this.player.y, 18, 12, obs);
+      if (resolved.collided) {
+        this.player.x = resolved.x;
+        this.player.y = resolved.y;
+      }
+    }
+
     // Clamp to arena bounds
     const margin = 32;
     this.player.x = Math.max(-this.arenaHalfW + margin, Math.min(this.arenaHalfW - margin, this.player.x));
@@ -1848,7 +2035,7 @@ export class GameEngine {
 
   private spawnAfterimage(): void {
     const ghost = new Sprite(this.player.sprite.texture);
-    ghost.anchor.set(0.5, 0.5);
+    ghost.anchor.set(0.5, 0.56);
     ghost.position.set(this.player.x, this.player.y);
     ghost.scale.set(this.player.baseScale * this.player.facing, this.player.baseScale);
     ghost.tint = 0x38bdf8;
@@ -1859,21 +2046,31 @@ export class GameEngine {
 
   private updatePuppetVisuals(actor: PuppetActor, dt: number): void {
     actor.root.position.set(actor.x, actor.y);
-    actor.root.zIndex = actor.y;
+    // Sort by the actor's ground contact line (feet at y + 18) for unified 3/4 depth with stations & pillars
+    actor.root.zIndex = computeDepthZ(actor.y + 18);
 
     const speed = Math.hypot(actor.vx, actor.vy);
-    if (speed > 5) {
-      actor.walkDist += speed * dt * 0.12;
-      const bob = Math.abs(Math.sin(actor.walkDist)) * 4.5;
-      actor.bodyWrap.position.y = -bob;
-      const stretch = 1 + Math.sin(actor.walkDist * 2) * 0.07;
-      actor.bodyWrap.scale.x += (1 / stretch - actor.bodyWrap.scale.x) * Math.min(1, dt * 16);
-      actor.bodyWrap.scale.y += (stretch - actor.bodyWrap.scale.y) * Math.min(1, dt * 16);
-    } else {
-      actor.bodyWrap.position.y *= Math.pow(0.01, dt);
-      actor.bodyWrap.scale.x += (1 - actor.bodyWrap.scale.x) * Math.min(1, dt * 14);
-      actor.bodyWrap.scale.y += (1 - actor.bodyWrap.scale.y) * Math.min(1, dt * 14);
+    if (actor.spriteKey !== 'training_dummy') {
+      if (speed > 8) {
+        // Advance 4-frame pixel-art Run cycle synced to distance traveled (zero jelly distortion!)
+        actor.walkDist += speed * dt * 0.055;
+        const runFrame = Math.floor(actor.walkDist) % 4;
+        actor.sprite.texture = SpriteFactory.getActorFrameTexture(actor.spriteKey, 'run', runFrame);
+        // Crisp 1-pixel stride cadence without warping sprite scale
+        const stepLift = runFrame === 1 || runFrame === 3 ? -2 : 0;
+        actor.bodyWrap.position.y = stepLift;
+      } else {
+        // Advance 4-frame pixel-art Idle breathing cycle with planted feet
+        actor.idleTime += dt * 4.2;
+        const idleFrame = Math.floor(actor.idleTime) % 4;
+        actor.sprite.texture = SpriteFactory.getActorFrameTexture(actor.spriteKey, 'idle', idleFrame);
+        actor.bodyWrap.position.y *= Math.pow(0.01, dt);
+      }
     }
+
+    // Smoothly settle any discrete impulse squash-and-stretch (dash / hit impact) back to crisp 1.0
+    actor.bodyWrap.scale.x += (1 - actor.bodyWrap.scale.x) * Math.min(1, dt * 16);
+    actor.bodyWrap.scale.y += (1 - actor.bodyWrap.scale.y) * Math.min(1, dt * 16);
 
     actor.sprite.scale.x = actor.baseScale * actor.facing;
     actor.sprite.scale.y = actor.baseScale;
@@ -1887,16 +2084,25 @@ export class GameEngine {
       actor.bodyWrap.alpha = 1;
     }
 
-    // Weapon pivot aiming & 120-degree swing arc
-    let weaponAngle = actor.aimAngle;
+    // Weapon pivot aiming, left-facing vertical mirror, behind-shoulder z-ordering & 120-degree swing arc
+    let swingOffset = 0;
     if (actor.swingTimer > 0) {
       actor.swingTimer = Math.max(0, actor.swingTimer - dt);
       const progress = 1 - actor.swingTimer / actor.swingDuration;
       const swingSpan = (120 * Math.PI) / 180;
-      const offset = (-swingSpan / 2 + progress * swingSpan) * actor.swingDir;
-      weaponAngle += offset;
+      swingOffset = (-swingSpan / 2 + progress * swingSpan) * actor.swingDir;
     }
-    actor.weaponPivot.rotation = weaponAngle + Math.PI / 4;
+
+    const hand = computeWeaponHandTransform(
+      actor.aimAngle,
+      actor.facing,
+      swingOffset,
+      actor.weaponBaseScale
+    );
+    actor.weaponPivot.position.set(hand.pivotX, hand.pivotY + actor.bodyWrap.position.y * 0.5);
+    actor.weaponSprite.scale.set(hand.scaleX, hand.scaleY);
+    actor.weaponPivot.rotation = hand.rotation;
+    actor.weaponPivot.zIndex = hand.behindBody ? 1 : 3;
   }
 
   private updateWaveSpawner(dt: number): void {
@@ -1964,17 +2170,42 @@ export class GameEngine {
           e.telegraphGraphic.clear();
           const progress = 1 - Math.max(0, e.windupTimer / e.windupDuration);
           if (def.behavior === 'heavy_charger') {
-            // Line telegraph + target slam circle
+            // 3/4 Perspective ground charge corridor + foreshortened slam ellipse at target feet
             const relTx = e.chargeTargetX - e.x;
             const relTy = e.chargeTargetY - e.y;
+            const slamRx = 46;
+            const slamRy = toPerspectiveRy(slamRx);
             e.telegraphGraphic
-              .circle(relTx, relTy, 44)
-              .fill({ color: 0xdc2626, alpha: 0.15 + progress * 0.25 })
-              .stroke({ color: 0xef4444, width: 2, alpha: 0.85 });
+              .moveTo(0, 16)
+              .lineTo(relTx, relTy + 16)
+              .stroke({ color: 0xef4444, width: 3, alpha: 0.35 + progress * 0.35 });
+            e.telegraphGraphic
+              .ellipse(relTx, relTy + 16, slamRx, slamRy)
+              .fill({ color: 0xdc2626, alpha: 0.14 + progress * 0.24 })
+              .stroke({ color: 0xef4444, width: 2, alpha: 0.88 });
+            e.telegraphGraphic
+              .ellipse(relTx, relTy + 16, Math.max(6, slamRx * progress), Math.max(3, slamRy * progress))
+              .stroke({ color: 0xfca5a5, width: 1.5, alpha: 0.65 });
+          } else if (def.behavior === 'ranged_kiter') {
+            // 3/4 Arcane foot rune ellipse + directional aim sight-line toward player
+            const castRx = 24;
+            const castRy = toPerspectiveRy(castRx);
+            const aimLen = Math.min(dist, 165);
+            e.telegraphGraphic
+              .ellipse(0, 18, castRx, castRy)
+              .fill({ color: 0x9333ea, alpha: 0.14 + progress * 0.2 })
+              .stroke({ color: 0xc084fc, width: 1.5, alpha: 0.55 + progress * 0.4 });
+            e.telegraphGraphic
+              .moveTo(dirX * 14, 10 + dirY * 8)
+              .lineTo(dirX * aimLen, 10 + dirY * aimLen)
+              .stroke({ color: 0xe879f9, width: 1.5, alpha: 0.35 + progress * 0.45 });
           } else {
+            const teleRx = e.attackRange * 0.78;
+            const teleRy = toPerspectiveRy(teleRx);
             e.telegraphGraphic
-              .circle(0, 8, e.attackRange * 0.75)
-              .stroke({ color: 0xfbbf24, width: 1.5, alpha: 0.4 + progress * 0.5 });
+              .ellipse(0, 16, teleRx, teleRy)
+              .fill({ color: 0xf59e0b, alpha: 0.06 + progress * 0.1 })
+              .stroke({ color: 0xfbbf24, width: 1.5, alpha: 0.42 + progress * 0.5 });
           }
         }
 
@@ -2094,6 +2325,15 @@ export class GameEngine {
       e.knockVx *= Math.pow(0.001, dt);
       e.knockVy *= Math.pow(0.001, dt);
 
+      // Resolve 3/4 elliptical footprint collisions against pillars & braziers for enemies
+      for (const obs of this.obstacles) {
+        const resolved = resolveEllipticalCollider(e.x, e.y, 18, 11, obs);
+        if (resolved.collided) {
+          e.x = resolved.x;
+          e.y = resolved.y;
+        }
+      }
+
       const margin = 36;
       e.x = Math.max(-this.arenaHalfW + margin, Math.min(this.arenaHalfW - margin, e.x));
       e.y = Math.max(-this.arenaHalfH + margin, Math.min(this.arenaHalfH - margin, e.y));
@@ -2157,6 +2397,22 @@ export class GameEngine {
         if (Math.hypot(this.player.x - p.x, this.player.y - p.y) <= 22) {
           this.damagePlayer(p.damage, p.x, p.y);
           hit = true;
+        }
+      }
+
+      // Check tactical projectile cover against solid 3/4 dungeon pillars
+      if (!hit) {
+        for (const obs of this.obstacles) {
+          if (checkProjectileObstacleHit(p.x, p.y, p.radius * 0.55, obs)) {
+            this.spawnPixelFx('impact_hit', p.x, p.y, {
+              scale: 1.05,
+              rotation: Math.atan2(-p.vy, -p.vx),
+              tint: 0x94a3b8,
+            });
+            this.spawnParticles(p.x, p.y, 0x94a3b8, 6, 95);
+            hit = true;
+            break;
+          }
         }
       }
 
@@ -2270,6 +2526,32 @@ export class GameEngine {
 
     if (closest !== store.nearbyStation) {
       store.setNearbyStation(closest);
+    }
+  }
+
+  private updateOcclusionFade(dt: number): void {
+    const fadeSpeed = Math.min(1, dt * 12);
+
+    // 1. Fade tall dungeon pillars when player or an enemy stands behind their upper shaft
+    for (const pillar of this.pillars) {
+      let occluded = shouldOccludeFade(this.player.x, this.player.y, 18, pillar.structure);
+      if (!occluded) {
+        for (const e of this.enemies) {
+          if (!e.isDying && shouldOccludeFade(e.x, e.y, 18, pillar.structure)) {
+            occluded = true;
+            break;
+          }
+        }
+      }
+      const targetAlpha = occluded ? 0.42 : 1.0;
+      pillar.upperColumn.alpha += (targetAlpha - pillar.upperColumn.alpha) * fadeSpeed;
+    }
+
+    // 2. Fade tall station sprites/portals when player walks behind them
+    for (const st of this.stations) {
+      const occluded = shouldOccludeFade(this.player.x, this.player.y, 18, st.occludeStructure);
+      const targetAlpha = occluded ? 0.48 : 1.0;
+      st.upperWrap.alpha += (targetAlpha - st.upperWrap.alpha) * fadeSpeed;
     }
   }
 
