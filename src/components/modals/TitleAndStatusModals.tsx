@@ -1,8 +1,8 @@
 import React from 'react';
-import { Play, RotateCcw, ShieldCheck, Skull, Trophy } from 'lucide-react';
+import { LogOut, Play, RotateCcw, ShieldCheck, Skull, Trophy } from 'lucide-react';
 import { RARITY_CONFIG } from '../../data/items';
 import { SoundManager } from '../../engine/SoundManager';
-import { useGameStore } from '../../store/useGameStore';
+import { RETREAT_KEEP_RATIO, useGameStore } from '../../store/useGameStore';
 import { ItemIcon } from '../ui/ItemIcon';
 
 export const TitleAndStatusModals: React.FC = () => {
@@ -11,12 +11,16 @@ export const TitleAndStatusModals: React.FC = () => {
     setShellState,
     mode,
     currentWave,
+    hubUpgrades,
+    runGold,
+    runEssence,
+    runBag,
     highestWaveReached,
     totalRunsCompleted,
     lastRunSummary,
     returnToHubFromSummary,
     startDungeonRun,
-    extractToHub,
+    retreatToHub,
   } = useGameStore();
 
   if (shellState === 'title') {
@@ -126,6 +130,11 @@ export const TitleAndStatusModals: React.FC = () => {
   }
 
   if (shellState === 'paused') {
+    const safePocketLevel = hubUpgrades.safe_pocket || 0;
+    const retreatKeepsItem = safePocketLevel > 0 && runBag.length > 0;
+    const retreatGold = Math.round(runGold * RETREAT_KEEP_RATIO);
+    const retreatEssence = Math.round(runEssence * RETREAT_KEEP_RATIO);
+
     return (
       <div
         role="dialog"
@@ -152,6 +161,25 @@ export const TitleAndStatusModals: React.FC = () => {
             </div>
           </div>
 
+          {mode === 'dungeon' && (
+            <div className="text-[11px] bg-[#161a26] border border-slate-800 rounded-lg p-3 space-y-1 text-left">
+              <div className="flex justify-between gap-3">
+                <span className="text-slate-400">В рюкзаке вылазки</span>
+                <span className="font-mono-num text-slate-200">
+                  {runBag.length} предм. · +{runGold} зол. · +{runEssence} эсс.
+                </span>
+              </div>
+              <div className="flex justify-between gap-3">
+                <span className="text-slate-400">Потеряется при отступлении</span>
+                <span className="font-mono-num text-rose-300/90">
+                  {runBag.length - (retreatKeepsItem ? 1 : 0)} предм. ·{' '}
+                  {Math.max(0, runGold - retreatGold)} зол. ·{' '}
+                  {Math.max(0, runEssence - retreatEssence)} эсс.
+                </span>
+              </div>
+            </div>
+          )}
+
           <div className="space-y-2.5 pt-2">
             <button
               type="button"
@@ -164,10 +192,15 @@ export const TitleAndStatusModals: React.FC = () => {
             {mode === 'dungeon' && (
               <button
                 type="button"
-                onClick={() => extractToHub()}
-                className="w-full py-2.5 px-4 rounded-lg bg-emerald-950/60 hover:bg-emerald-900/70 text-emerald-300 border border-emerald-500/40 font-semibold text-xs transition-colors cursor-pointer"
+                onClick={() => retreatToHub()}
+                className="w-full py-2.5 px-4 rounded-lg bg-amber-950/50 hover:bg-amber-900/60 text-amber-300 border border-amber-500/40 font-semibold text-xs transition-colors cursor-pointer"
               >
-                Отступить в Хаб (Сохранить добычу)
+                <span className="block">Отступить в Хаб (с потерями)</span>
+                <span className="block mt-0.5 text-[10px] font-normal text-amber-300/80">
+                  {`Сохранится ${retreatGold} золота и ${retreatEssence} эссенции${
+                    retreatKeepsItem ? ' и 1 предмет' : ', все предметы пропадут'
+                  }`}
+                </span>
               </button>
             )}
 
@@ -186,17 +219,24 @@ export const TitleAndStatusModals: React.FC = () => {
 
   if (shellState === 'gameover' && lastRunSummary) {
     const isVictory = lastRunSummary.outcome === 'extracted';
+    const isRetreat = lastRunSummary.outcome === 'retreated';
 
     return (
       <div
         role="dialog"
-        aria-label={isVictory ? 'Итоги эвакуации' : 'Поражение в подземелье'}
+        aria-label={
+          isVictory ? 'Итоги эвакуации' : isRetreat ? 'Итоги отступления' : 'Поражение'
+        }
         data-hud-interactive="true"
         className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 pointer-events-auto"
       >
         <div
           className={`w-full max-w-lg bg-[#11141d] border rounded-xl p-6 shadow-2xl space-y-5 ${
-            isVictory ? 'border-emerald-500/50' : 'border-rose-500/50'
+            isVictory
+              ? 'border-emerald-500/50'
+              : isRetreat
+                ? 'border-amber-500/50'
+                : 'border-rose-500/50'
           }`}
         >
           <div className="flex items-center gap-3">
@@ -204,19 +244,33 @@ export const TitleAndStatusModals: React.FC = () => {
               className={`w-12 h-12 rounded-xl flex items-center justify-center border ${
                 isVictory
                   ? 'bg-emerald-950/60 border-emerald-500/50 text-emerald-400'
-                  : 'bg-rose-950/60 border-rose-500/50 text-rose-400'
+                  : isRetreat
+                    ? 'bg-amber-950/60 border-amber-500/50 text-amber-400'
+                    : 'bg-rose-950/60 border-rose-500/50 text-rose-400'
               }`}
             >
-              {isVictory ? <Trophy className="w-6 h-6" /> : <Skull className="w-6 h-6" />}
+              {isVictory ? (
+                <Trophy className="w-6 h-6" />
+              ) : isRetreat ? (
+                <LogOut className="w-6 h-6" />
+              ) : (
+                <Skull className="w-6 h-6" />
+              )}
             </div>
             <div>
               <h2 className="text-2xl font-display font-bold text-slate-100">
-                {isVictory ? 'Эвакуация прошла успешно!' : 'Вы пали в катакомбах'}
+                {isVictory
+                  ? 'Эвакуация прошла успешно!'
+                  : isRetreat
+                    ? 'Отступление из катакомб'
+                    : 'Вы пали в катакомбах'}
               </h2>
               <p className="text-xs text-slate-400">
                 {isVictory
                   ? 'Вся собранная добыча доставлена в Сундук Хранилища Цитадели'
-                  : 'Неэвакуированные предметы потеряны, кроме защищённого Тайным Карманом'}
+                  : isRetreat
+                    ? 'Вы вышли до открытия Алтаря: сохранён один предмет и половина ресурсов'
+                    : 'Неэвакуированные предметы потеряны, кроме защищённого Тайным Карманом'}
               </p>
             </div>
           </div>
@@ -241,6 +295,12 @@ export const TitleAndStatusModals: React.FC = () => {
               </div>
             </div>
           </div>
+
+          {lastRunSummary.itemsLost > 0 && (
+            <p className="text-[11px] text-rose-300/90 text-center">
+              Потеряно предметов: {lastRunSummary.itemsLost}
+            </p>
+          )}
 
           {lastRunSummary.itemsExtracted.length > 0 && (
             <div className="bg-[#0d1017] border border-slate-800 rounded-lg p-3.5">

@@ -99,6 +99,7 @@ export interface GameStoreState {
   consumePendingFloorDrops: () => GameItem[];
   dropRunBagItem: (itemId: string) => void;
   extractToHub: () => void;
+  retreatToHub: () => void;
   proceedToNextWave: () => void;
   triggerPlayerDefeat: () => void;
   returnToHubFromSummary: () => void;
@@ -118,6 +119,69 @@ const RARITY_RANK: Record<ItemRarity, number> = {
   rare: 3,
   epic: 4,
   legendary: 5,
+};
+
+// Поражение сохраняет один предмет и 35% ресурсов, ранний выход — один предмет и 50%,
+// эвакуация через Алтарь забирает всё.
+const DEFEAT_KEEP_RATIO = 0.35;
+export const RETREAT_KEEP_RATIO = 0.5;
+
+type StoreSet = (partial: Partial<GameStoreState>) => void;
+
+/** Общий финал вылазки с потерями: поражение (35%) и отступление (50%). */
+const finishRunWithLoss = (
+  state: GameStoreState,
+  set: StoreSet,
+  outcome: 'retreated' | 'defeat',
+  keepRatio: number
+) => {
+  const stats = computePlayerStats(state.equipped, state.hubUpgrades);
+  const hasSafePocket = (state.hubUpgrades.safe_pocket || 0) > 0;
+
+  const savedItem =
+    hasSafePocket && state.runBag.length > 0
+      ? state.runBag.find((i) => i.isProtected) ||
+        [...state.runBag].sort((a, b) => RARITY_RANK[b.rarity] - RARITY_RANK[a.rarity])[0]
+      : null;
+  const cleanedSaved = savedItem ? { ...savedItem, isProtected: false } : null;
+
+  const keptGold = Math.round(state.runGold * keepRatio);
+  const keptEssence = Math.round(state.runEssence * keepRatio);
+  const durationSec = Math.max(1, Math.round((Date.now() - state.runStartTime) / 1000));
+
+  const summary: RunSummarySnapshot = {
+    outcome,
+    waveReached: state.currentWave,
+    enemiesSlain: state.runEnemiesSlain,
+    goldCollected: keptGold,
+    essenceCollected: keptEssence,
+    itemsExtracted: cleanedSaved ? [cleanedSaved] : [],
+    itemsLost: Math.max(0, state.runBag.length - (cleanedSaved ? 1 : 0)),
+    protectedItemSaved: cleanedSaved,
+    durationSec,
+  };
+
+  if (typeof document !== 'undefined') {
+    document.body.dataset.state = 'gameover';
+  }
+
+  set({
+    shellState: 'gameover',
+    mode: 'hub',
+    activeStationModal: null,
+    nearbyStation: null,
+    gold: state.gold + keptGold,
+    essence: state.essence + keptEssence,
+    stash: cleanedSaved ? [cleanedSaved, ...state.stash] : state.stash,
+    playerHp: stats.maxHp,
+    playerMaxHp: stats.maxHp,
+    runBag: [],
+    pendingFloorDrops: [],
+    runGold: 0,
+    runEssence: 0,
+    extractionPortalOpen: false,
+    lastRunSummary: summary,
+  });
 };
 
 export const useGameStore = create<GameStoreState>()(
@@ -635,6 +699,8 @@ export const useGameStore = create<GameStoreState>()(
         });
       },
 
+      retreatToHub: () => finishRunWithLoss(get(), set, 'retreated', RETREAT_KEEP_RATIO),
+
       proceedToNextWave: () => {
         const state = get();
         const nextWave = state.currentWave + 1;
@@ -659,57 +725,7 @@ export const useGameStore = create<GameStoreState>()(
         );
       },
 
-      triggerPlayerDefeat: () => {
-        const state = get();
-        const stats = computePlayerStats(state.equipped, state.hubUpgrades);
-        const hasSafePocket = (state.hubUpgrades.safe_pocket || 0) > 0;
-
-        let savedItem: GameItem | null = null;
-        if (hasSafePocket && state.runBag.length > 0) {
-          savedItem =
-            state.runBag.find((i) => i.isProtected) ||
-            [...state.runBag].sort((a, b) => RARITY_RANK[b.rarity] - RARITY_RANK[a.rarity])[0];
-        }
-
-        const cleanedSaved = savedItem ? { ...savedItem, isProtected: false } : null;
-        const keptGold = Math.round(state.runGold * 0.35);
-        const keptEssence = Math.round(state.runEssence * 0.35);
-        const durationSec = Math.max(1, Math.round((Date.now() - state.runStartTime) / 1000));
-
-        const summary: RunSummarySnapshot = {
-          outcome: 'defeat',
-          waveReached: state.currentWave,
-          enemiesSlain: state.runEnemiesSlain,
-          goldCollected: keptGold,
-          essenceCollected: keptEssence,
-          itemsExtracted: cleanedSaved ? [cleanedSaved] : [],
-          itemsLost: Math.max(0, state.runBag.length - (cleanedSaved ? 1 : 0)),
-          protectedItemSaved: cleanedSaved,
-          durationSec,
-        };
-
-        if (typeof document !== 'undefined') {
-          document.body.dataset.state = 'gameover';
-        }
-
-        set({
-          shellState: 'gameover',
-          mode: 'hub',
-          activeStationModal: null,
-          nearbyStation: null,
-          gold: state.gold + keptGold,
-          essence: state.essence + keptEssence,
-          stash: cleanedSaved ? [cleanedSaved, ...state.stash] : state.stash,
-          playerHp: stats.maxHp,
-          playerMaxHp: stats.maxHp,
-          runBag: [],
-          pendingFloorDrops: [],
-          runGold: 0,
-          runEssence: 0,
-          extractionPortalOpen: false,
-          lastRunSummary: summary,
-        });
-      },
+      triggerPlayerDefeat: () => finishRunWithLoss(get(), set, 'defeat', DEFEAT_KEEP_RATIO),
 
       returnToHubFromSummary: () => {
         const state = get();
