@@ -40,6 +40,7 @@ export const RunBagModal: React.FC = () => {
   const {
     currentWave,
     runBag,
+    runStartingGear,
     runGold,
     runEssence,
     equipped,
@@ -66,6 +67,7 @@ export const RunBagModal: React.FC = () => {
 
   const selectedSalvage = selectedItem ? getItemSalvageValue(selectedItem) : null;
   const hasSafePocket = (hubUpgrades.safe_pocket || 0) > 0;
+  const selectedIsStartingGear = selectedItem && runStartingGear?.[selectedItem.slot]?.id === selectedItem.id;
   const commonCount = runBag.filter((i) => i.rarity === 'common' && !i.isProtected).length;
 
   return (
@@ -87,7 +89,7 @@ export const RunBagModal: React.FC = () => {
                 Полевой Рюкзак Вылазки ({runBag.length} / 10)
               </h2>
               <p className="text-xs text-slate-400">
-                Волна {currentWave} · Разбирайте слабые вещи на ресурсы, выбрасывайте лишнее на пол или экипируйте трофеи прямо в бою
+                Волна {currentWave} · Надетые находки тоже можно потерять при отступлении или гибели
               </p>
             </div>
           </div>
@@ -224,6 +226,7 @@ export const RunBagModal: React.FC = () => {
                           iconName={eqItem.iconName}
                           rarity={eqItem.rarity}
                           level={eqItem.level}
+                          isProtected={eqItem.isProtected}
                           size="sm"
                         />
                       ) : (
@@ -362,7 +365,7 @@ export const RunBagModal: React.FC = () => {
                     Экипировать в бою (Заменить {SLOT_NAMES_RU[selectedItem.slot].toLowerCase()})
                   </button>
 
-                  {hasSafePocket && (
+                  {hasSafePocket && !selectedIsStartingGear && (
                     <button
                       type="button"
                       onClick={() => {
@@ -378,7 +381,7 @@ export const RunBagModal: React.FC = () => {
                       <Lock className="w-3.5 h-3.5" />
                       {selectedItem.isProtected
                         ? 'Защищено в Тайном Кармане'
-                        : 'Положить в Тайный Карман (Сохранить при гибели)'}
+                        : 'Защитить при отступлении и гибели'}
                     </button>
                   )}
 

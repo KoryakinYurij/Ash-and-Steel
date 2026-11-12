@@ -181,6 +181,7 @@ export class GameEngine {
   private particlePool: PooledParticle[] = [];
 
   private waveEnemiesSpawned = 0;
+  private activeRunId = 0;
   private waveEnemiesKilled = 0;
   private waveEnemiesTotal = 10;
   private waveSpawnTimer = 0;
@@ -882,8 +883,10 @@ export class GameEngine {
   }
 
   public buildDungeonScene(wave: number): void {
+    const store = useGameStore.getState();
     this.clearSceneEntities();
     this.activeMode = 'dungeon';
+    this.activeRunId = store.runId;
     this.activeWave = wave;
     this.buildArenaTiles(540, 360, false);
 
@@ -902,7 +905,7 @@ export class GameEngine {
     this.waveMaxConcurrent = comp.maxConcurrent;
     this.waveSpawnTimer = 0.4;
 
-    useGameStore.getState().syncWaveProgress(0, this.waveEnemiesTotal, false);
+    store.syncWaveProgress(0, this.waveEnemiesTotal, false);
 
     // Spawn initial 3 enemies around the perimeter so action starts immediately
     for (let i = 0; i < 3; i++) {
@@ -1693,15 +1696,17 @@ export class GameEngine {
     if (!this.app) return;
     const store = useGameStore.getState();
 
-    // Detect mode or wave transitions driven by Zustand store
-    if (store.mode !== this.activeMode) {
-      if (store.mode === 'hub') {
-        this.buildHubScene();
-      } else {
+    // A new run can start on the same wave as the previous run.
+    if (store.mode === 'dungeon') {
+      if (
+        this.activeMode !== 'dungeon' ||
+        store.currentWave !== this.activeWave ||
+        store.runId !== this.activeRunId
+      ) {
         this.buildDungeonScene(store.currentWave);
       }
-    } else if (store.mode === 'dungeon' && store.currentWave !== this.activeWave) {
-      this.buildDungeonScene(store.currentWave);
+    } else if (this.activeMode !== 'hub') {
+      this.buildHubScene();
     }
 
     this.syncEquippedWeaponTexture();
@@ -1714,7 +1719,8 @@ export class GameEngine {
     }
     this.updateLoopingPixelFx(dt);
 
-    if (store.shellState === 'paused' || store.shellState === 'gameover') {
+    const dungeonBehindTitle = store.mode === 'dungeon' && store.shellState === 'title';
+    if (store.shellState === 'paused' || store.shellState === 'gameover' || dungeonBehindTitle) {
       this.updateCamera(dt);
       return;
     }

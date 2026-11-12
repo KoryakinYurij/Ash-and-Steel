@@ -2,26 +2,50 @@ import React from 'react';
 import { LogOut, Play, RotateCcw, ShieldCheck, Skull, Trophy } from 'lucide-react';
 import { RARITY_CONFIG } from '../../data/items';
 import { SoundManager } from '../../engine/SoundManager';
-import { RETREAT_KEEP_RATIO, useGameStore } from '../../store/useGameStore';
+import { getRunLossPayout, useGameStore } from '../../store/useGameStore';
 import { ItemIcon } from '../ui/ItemIcon';
 
+const runOutcomes = {
+  extracted: {
+    label: 'Итоги эвакуации',
+    title: 'Эвакуация прошла успешно!',
+    border: 'border-emerald-500/50',
+    iconStyle: 'bg-emerald-950/60 border-emerald-500/50 text-emerald-400',
+    Icon: Trophy,
+  },
+  retreated: {
+    label: 'Итоги отступления',
+    title: 'Отступление из катакомб',
+    border: 'border-amber-500/50',
+    iconStyle: 'bg-amber-950/60 border-amber-500/50 text-amber-400',
+    Icon: LogOut,
+  },
+  defeat: {
+    label: 'Поражение',
+    title: 'Вы пали в катакомбах',
+    border: 'border-rose-500/50',
+    iconStyle: 'bg-rose-950/60 border-rose-500/50 text-rose-400',
+    Icon: Skull,
+  },
+};
+
 export const TitleAndStatusModals: React.FC = () => {
+  const state = useGameStore();
   const {
     shellState,
     setShellState,
     mode,
     currentWave,
-    hubUpgrades,
     runGold,
     runEssence,
-    runBag,
+    extractionPortalOpen,
     highestWaveReached,
     totalRunsCompleted,
     lastRunSummary,
     returnToHubFromSummary,
     startDungeonRun,
     retreatToHub,
-  } = useGameStore();
+  } = state;
 
   if (shellState === 'title') {
     return (
@@ -99,7 +123,7 @@ export const TitleAndStatusModals: React.FC = () => {
               className="px-7 py-3.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-sm flex items-center gap-2.5 shadow-lg shadow-amber-500/25 transition-all cursor-pointer whitespace-nowrap shrink-0"
             >
               <Play className="w-4 h-4 fill-current" />
-              Войти в Цитадель (Хаб)
+              {mode === 'dungeon' ? 'Продолжить вылазку' : 'Войти в Цитадель (Хаб)'}
             </button>
 
             <button
@@ -110,14 +134,14 @@ export const TitleAndStatusModals: React.FC = () => {
               }}
               className="px-5 py-3.5 rounded-xl bg-[#171b26] hover:bg-[#1f2536] text-slate-200 border border-slate-700 font-semibold text-sm transition-colors cursor-pointer whitespace-nowrap shrink-0"
             >
-              Сразу в Вылазку (Волна 1)
+              {mode === 'dungeon' ? 'Начать новую вылазку' : 'Сразу в Вылазку (Волна 1)'}
             </button>
           </div>
 
           <div className="flex items-center gap-6 text-xs text-slate-400 font-mono-num pt-2">
             <span>Рекорд глубины: Волна {highestWaveReached}</span>
             <span>·</span>
-            <span>Завершено вылазок: {totalRunsCompleted}</span>
+            <span>Успешных эвакуаций: {totalRunsCompleted}</span>
           </div>
         </div>
 
@@ -130,10 +154,7 @@ export const TitleAndStatusModals: React.FC = () => {
   }
 
   if (shellState === 'paused') {
-    const safePocketLevel = hubUpgrades.safe_pocket || 0;
-    const retreatKeepsItem = safePocketLevel > 0 && runBag.length > 0;
-    const retreatGold = Math.round(runGold * RETREAT_KEEP_RATIO);
-    const retreatEssence = Math.round(runEssence * RETREAT_KEEP_RATIO);
+    const retreat = mode === 'dungeon' ? getRunLossPayout(state, 'retreated') : null;
 
     return (
       <div
@@ -156,25 +177,30 @@ export const TitleAndStatusModals: React.FC = () => {
               <div className="text-base font-bold text-amber-400 mt-0.5">{highestWaveReached}</div>
             </div>
             <div className="p-3 rounded-lg bg-[#161a26] border border-slate-800">
-              <div className="text-slate-400">Вылазок</div>
+              <div className="text-slate-400">Успешных эвакуаций</div>
               <div className="text-base font-bold text-emerald-400 mt-0.5">{totalRunsCompleted}</div>
             </div>
           </div>
 
-          {mode === 'dungeon' && (
-            <div className="text-[11px] bg-[#161a26] border border-slate-800 rounded-lg p-3 space-y-1 text-left">
+          {retreat && (
+            <div className="text-xs bg-[#161a26] border border-slate-800 rounded-lg p-3 space-y-2 text-left">
+              {extractionPortalOpen && (
+                <p className="text-emerald-300">Алтарь открыт. Эвакуация сохранит всю добычу.</p>
+              )}
               <div className="flex justify-between gap-3">
-                <span className="text-slate-400">В рюкзаке вылазки</span>
-                <span className="font-mono-num text-slate-200">
-                  {runBag.length} предм. · +{runGold} зол. · +{runEssence} эсс.
+                <span className="text-slate-400">Сохранится при отступлении</span>
+                <span className="font-mono-num text-slate-200 text-right">
+                  {retreat.keptGold} зол. · {retreat.keptEssence} эсс.
                 </span>
               </div>
+              {retreat.itemSaved && (
+                <p className="text-amber-200">Тайный Карман сохранит «{retreat.itemSaved.name}»</p>
+              )}
               <div className="flex justify-between gap-3">
-                <span className="text-slate-400">Потеряется при отступлении</span>
-                <span className="font-mono-num text-rose-300/90">
-                  {runBag.length - (retreatKeepsItem ? 1 : 0)} предм. ·{' '}
-                  {Math.max(0, runGold - retreatGold)} зол. ·{' '}
-                  {Math.max(0, runEssence - retreatEssence)} эсс.
+                <span className="text-slate-400">Потеряется</span>
+                <span className="font-mono-num text-rose-300/90 text-right">
+                  {retreat.itemsLost} предм. · {runGold - retreat.keptGold} зол. ·{' '}
+                  {runEssence - retreat.keptEssence} эсс.
                 </span>
               </div>
             </div>
@@ -189,18 +215,13 @@ export const TitleAndStatusModals: React.FC = () => {
               Продолжить игру
             </button>
 
-            {mode === 'dungeon' && (
+            {retreat && (
               <button
                 type="button"
                 onClick={() => retreatToHub()}
                 className="w-full py-2.5 px-4 rounded-lg bg-amber-950/50 hover:bg-amber-900/60 text-amber-300 border border-amber-500/40 font-semibold text-xs transition-colors cursor-pointer"
               >
-                <span className="block">Отступить в Хаб (с потерями)</span>
-                <span className="block mt-0.5 text-[10px] font-normal text-amber-300/80">
-                  {`Сохранится ${retreatGold} золота и ${retreatEssence} эссенции${
-                    retreatKeepsItem ? ' и 1 предмет' : ', все предметы пропадут'
-                  }`}
-                </span>
+                Отступить в Хаб
               </button>
             )}
 
@@ -218,60 +239,30 @@ export const TitleAndStatusModals: React.FC = () => {
   }
 
   if (shellState === 'gameover' && lastRunSummary) {
-    const isVictory = lastRunSummary.outcome === 'extracted';
-    const isRetreat = lastRunSummary.outcome === 'retreated';
+    const { label, title, border, iconStyle, Icon } = runOutcomes[lastRunSummary.outcome];
+    const savedCount = lastRunSummary.itemsExtracted.length;
 
     return (
       <div
         role="dialog"
-        aria-label={
-          isVictory ? 'Итоги эвакуации' : isRetreat ? 'Итоги отступления' : 'Поражение'
-        }
+        aria-label={label}
         data-hud-interactive="true"
         className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 pointer-events-auto"
       >
         <div
-          className={`w-full max-w-lg bg-[#11141d] border rounded-xl p-6 shadow-2xl space-y-5 ${
-            isVictory
-              ? 'border-emerald-500/50'
-              : isRetreat
-                ? 'border-amber-500/50'
-                : 'border-rose-500/50'
-          }`}
+          className={`w-full max-w-lg max-h-[90dvh] overflow-y-auto bg-[#11141d] border rounded-xl p-6 shadow-2xl space-y-5 ${border}`}
         >
           <div className="flex items-center gap-3">
             <div
-              className={`w-12 h-12 rounded-xl flex items-center justify-center border ${
-                isVictory
-                  ? 'bg-emerald-950/60 border-emerald-500/50 text-emerald-400'
-                  : isRetreat
-                    ? 'bg-amber-950/60 border-amber-500/50 text-amber-400'
-                    : 'bg-rose-950/60 border-rose-500/50 text-rose-400'
-              }`}
+              className={`w-12 h-12 shrink-0 rounded-xl flex items-center justify-center border ${iconStyle}`}
             >
-              {isVictory ? (
-                <Trophy className="w-6 h-6" />
-              ) : isRetreat ? (
-                <LogOut className="w-6 h-6" />
-              ) : (
-                <Skull className="w-6 h-6" />
-              )}
+              <Icon className="w-6 h-6" />
             </div>
             <div>
               <h2 className="text-2xl font-display font-bold text-slate-100">
-                {isVictory
-                  ? 'Эвакуация прошла успешно!'
-                  : isRetreat
-                    ? 'Отступление из катакомб'
-                    : 'Вы пали в катакомбах'}
+                {title}
               </h2>
-              <p className="text-xs text-slate-400">
-                {isVictory
-                  ? 'Вся собранная добыча доставлена в Сундук Хранилища Цитадели'
-                  : isRetreat
-                    ? 'Вы вышли до открытия Алтаря: сохранён один предмет и половина ресурсов'
-                    : 'Неэвакуированные предметы потеряны, кроме защищённого Тайным Карманом'}
-              </p>
+              {savedCount === 0 && <p className="text-xs text-slate-400">Предметы не сохранены</p>}
             </div>
           </div>
 
@@ -302,11 +293,11 @@ export const TitleAndStatusModals: React.FC = () => {
             </p>
           )}
 
-          {lastRunSummary.itemsExtracted.length > 0 && (
+          {savedCount > 0 && (
             <div className="bg-[#0d1017] border border-slate-800 rounded-lg p-3.5">
               <div className="text-xs font-semibold text-slate-300 mb-2 flex items-center gap-1.5">
                 <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                <span>Сохранено предметов ({lastRunSummary.itemsExtracted.length}):</span>
+                <span>{lastRunSummary.protectedItemSaved ? 'Спасено Тайным Карманом' : `Сохранено предметов (${savedCount})`}</span>
               </div>
               <div className="flex flex-wrap gap-2">
                 {lastRunSummary.itemsExtracted.map((item) => (

@@ -308,6 +308,7 @@ export const GameHUD: React.FC = () => {
                     iconName={item.iconName}
                     rarity={item.rarity}
                     level={item.level}
+                    isProtected={item.isProtected}
                     size="sm"
                   />
                 ) : (

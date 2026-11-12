@@ -38,7 +38,7 @@ export interface GameStoreState {
   // Permanent Hub State (persisted)
   gold: number;
   essence: number;
-  equipped: EquippedGear;
+  equipped: EquippedGear; // Active loadout. Only secured gear is persisted.
   stash: GameItem[];
   hubUpgrades: Record<HubUpgradeId, number>;
   highestWaveReached: number;
@@ -53,11 +53,13 @@ export interface GameStoreState {
   currentWave: number;
   waveEnemiesKilled: number;
   waveEnemiesTotal: number;
+  runStartingGear: EquippedGear | null;
   runBag: GameItem[]; // Max 10 slots
   pendingFloorDrops: GameItem[];
   runGold: number;
   runEssence: number;
   runEnemiesSlain: number;
+  runId: number;
   runStartTime: number;
   extractionPortalOpen: boolean;
   lastRunSummary: RunSummarySnapshot | null;
@@ -121,32 +123,94 @@ const RARITY_RANK: Record<ItemRarity, number> = {
   legendary: 5,
 };
 
-// Поражение сохраняет один предмет и 35% ресурсов, ранний выход — один предмет и 50%,
-// эвакуация через Алтарь забирает всё.
-const DEFEAT_KEEP_RATIO = 0.35;
-export const RETREAT_KEEP_RATIO = 0.5;
+type LossOutcome = 'retreated' | 'defeat';
+const LOSS_KEEP_RATIO: Record<LossOutcome, number> = { retreated: 0.5, defeat: 0.35 };
+const GEAR_SLOTS: ItemSlot[] = ['weapon', 'armor', 'helmet', 'ring'];
 
+type RunInventory = Pick<GameStoreState, 'equipped' | 'runStartingGear' | 'runBag'>;
 type StoreSet = (partial: Partial<GameStoreState>) => void;
 
-/** Общий финал вылазки с потерями: поражение (35%) и отступление (50%). */
+const isStartingGear = (state: RunInventory, item: GameItem) =>
+  state.runStartingGear?.[item.slot]?.id === item.id;
+
+export const getRunLoot = (state: RunInventory): GameItem[] => {
+  const loot = state.runBag.filter((item) => !isStartingGear(state, item));
+  if (state.runStartingGear) {
+    for (const item of Object.values(state.equipped)) {
+      if (item && !isStartingGear(state, item)) loot.push(item);
+    }
+  }
+  return loot;
+};
+
+const getCarriedStartingGear = (state: RunInventory): EquippedGear => {
+  if (!state.runStartingGear) return state.equipped;
+
+  const restored = { ...state.runStartingGear };
+  for (const slot of GEAR_SLOTS) {
+    const item = restored[slot];
+    if (item && state.equipped[slot]?.id !== item.id && !state.runBag.some((i) => i.id === item.id)) {
+      restored[slot] = null;
+    }
+  }
+  return restored;
+};
+
+const highestRarityItem = (items: GameItem[]) =>
+  [...items].sort((a, b) => RARITY_RANK[b.rarity] - RARITY_RANK[a.rarity])[0] ?? null;
+
+const withGearProtection = (gear: EquippedGear, itemId?: string): EquippedGear => {
+  const equipped = { ...gear };
+  for (const slot of GEAR_SLOTS) {
+    const item = equipped[slot];
+    if (!item) continue;
+    const isProtected = item.id === itemId;
+    if (isProtected !== Boolean(item.isProtected)) equipped[slot] = { ...item, isProtected };
+  }
+  return equipped;
+};
+
+const withRunProtection = (state: RunInventory, itemId?: string) => ({
+  equipped: withGearProtection(state.equipped, itemId),
+  runBag: state.runBag.map((item) => ({ ...item, isProtected: item.id === itemId })),
+});
+
+const removeRunItem = (state: GameStoreState, removedItem: GameItem) => {
+  const runBag = state.runBag.filter((item) => item.id !== removedItem.id);
+  if (removedItem.isProtected && state.hubUpgrades.safe_pocket > 0) {
+    const remaining = { ...state, runBag };
+    const nextProtected = highestRarityItem(getRunLoot(remaining));
+    return withRunProtection(remaining, nextProtected?.id);
+  }
+  return { runBag };
+};
+
+export const getRunLossPayout = (state: GameStoreState, outcome: LossOutcome) => {
+  const loot = getRunLoot(state);
+  const itemSaved = state.hubUpgrades.safe_pocket > 0
+    ? loot.find((item) => item.isProtected) ?? highestRarityItem(loot)
+    : null;
+  const keepRatio = LOSS_KEEP_RATIO[outcome];
+
+  return {
+    itemSaved,
+    itemsLost: loot.length - (itemSaved ? 1 : 0),
+    keptGold: Math.round(state.runGold * keepRatio),
+    keptEssence: Math.round(state.runEssence * keepRatio),
+  };
+};
+
 const finishRunWithLoss = (
   state: GameStoreState,
   set: StoreSet,
-  outcome: 'retreated' | 'defeat',
-  keepRatio: number
+  outcome: LossOutcome
 ) => {
-  const stats = computePlayerStats(state.equipped, state.hubUpgrades);
-  const hasSafePocket = (state.hubUpgrades.safe_pocket || 0) > 0;
+  if (state.mode !== 'dungeon') return;
 
-  const savedItem =
-    hasSafePocket && state.runBag.length > 0
-      ? state.runBag.find((i) => i.isProtected) ||
-        [...state.runBag].sort((a, b) => RARITY_RANK[b.rarity] - RARITY_RANK[a.rarity])[0]
-      : null;
-  const cleanedSaved = savedItem ? { ...savedItem, isProtected: false } : null;
-
-  const keptGold = Math.round(state.runGold * keepRatio);
-  const keptEssence = Math.round(state.runEssence * keepRatio);
+  const { itemSaved, itemsLost, keptGold, keptEssence } = getRunLossPayout(state, outcome);
+  const cleanedSaved = itemSaved ? { ...itemSaved, isProtected: false } : null;
+  const equipped = getCarriedStartingGear(state);
+  const stats = computePlayerStats(equipped, state.hubUpgrades);
   const durationSec = Math.max(1, Math.round((Date.now() - state.runStartTime) / 1000));
 
   const summary: RunSummarySnapshot = {
@@ -156,7 +220,7 @@ const finishRunWithLoss = (
     goldCollected: keptGold,
     essenceCollected: keptEssence,
     itemsExtracted: cleanedSaved ? [cleanedSaved] : [],
-    itemsLost: Math.max(0, state.runBag.length - (cleanedSaved ? 1 : 0)),
+    itemsLost,
     protectedItemSaved: cleanedSaved,
     durationSec,
   };
@@ -172,9 +236,11 @@ const finishRunWithLoss = (
     nearbyStation: null,
     gold: state.gold + keptGold,
     essence: state.essence + keptEssence,
+    equipped,
     stash: cleanedSaved ? [cleanedSaved, ...state.stash] : state.stash,
     playerHp: stats.maxHp,
     playerMaxHp: stats.maxHp,
+    runStartingGear: null,
     runBag: [],
     pendingFloorDrops: [],
     runGold: 0,
@@ -212,11 +278,13 @@ export const useGameStore = create<GameStoreState>()(
       currentWave: 1,
       waveEnemiesKilled: 0,
       waveEnemiesTotal: 10,
+      runStartingGear: null,
       runBag: [],
       pendingFloorDrops: [],
       runGold: 0,
       runEssence: 0,
       runEnemiesSlain: 0,
+      runId: 0,
       runStartTime: Date.now(),
       extractionPortalOpen: false,
       lastRunSummary: null,
@@ -439,7 +507,8 @@ export const useGameStore = create<GameStoreState>()(
 
       startDungeonRun: () => {
         const state = get();
-        const stats = computePlayerStats(state.equipped, state.hubUpgrades);
+        const equipped = getCarriedStartingGear(state);
+        const stats = computePlayerStats(equipped, state.hubUpgrades);
         if (typeof document !== 'undefined') {
           document.body.dataset.state = 'playing';
         }
@@ -448,17 +517,20 @@ export const useGameStore = create<GameStoreState>()(
           mode: 'dungeon',
           activeStationModal: null,
           nearbyStation: null,
+          equipped,
           playerHp: stats.maxHp,
           playerMaxHp: stats.maxHp,
           dashCooldownRatio: 0,
           currentWave: 1,
           waveEnemiesKilled: 0,
           waveEnemiesTotal: 10,
+          runStartingGear: equipped,
           runBag: [],
           pendingFloorDrops: [],
           runGold: 0,
           runEssence: 0,
           runEnemiesSlain: 0,
+          runId: state.runId + 1,
           runStartTime: Date.now(),
           extractionPortalOpen: false,
           lastRunSummary: null,
@@ -508,8 +580,8 @@ export const useGameStore = create<GameStoreState>()(
           state.pushNotification('Рюкзак полон (10/10)! Нажмите [I / Tab], чтобы разобрать или выбросить вещи', 'warning');
           return false;
         }
-        const hasProtected = state.runBag.some((i) => i.isProtected);
-        const shouldProtect = (state.hubUpgrades.safe_pocket || 0) > 0 && !hasProtected;
+        const hasProtected = getRunLoot(state).some((i) => i.isProtected);
+        const shouldProtect = state.hubUpgrades.safe_pocket > 0 && !hasProtected && !isStartingGear(state, item);
         const taggedItem: GameItem = { ...item, isProtected: shouldProtect };
 
         set({
@@ -524,20 +596,18 @@ export const useGameStore = create<GameStoreState>()(
 
       toggleProtectRunItem: (itemId) => {
         const state = get();
+        const target = state.runBag.find((item) => item.id === itemId);
+        if (!target) return;
         if ((state.hubUpgrades.safe_pocket || 0) <= 0) {
           state.pushNotification('Сначала откройте Тайный Карман в Кузнице', 'warning');
           return;
         }
-        set({
-          runBag: state.runBag.map((i) => ({
-            ...i,
-            isProtected: i.id === itemId,
-          })),
-        });
-        const target = state.runBag.find((i) => i.id === itemId);
-        if (target) {
-          state.pushNotification(`В Тайном Кармане: ${target.name}`, 'info');
+        if (isStartingGear(state, target)) {
+          state.pushNotification('Снаряжение из Цитадели вернётся, пока вы несёте его с собой', 'info');
+          return;
         }
+        set(withRunProtection(state, itemId));
+        state.pushNotification(`В Тайном Кармане: ${target.name}`, 'info');
       },
 
       equipItemFromRunBag: (itemId) => {
@@ -545,15 +615,12 @@ export const useGameStore = create<GameStoreState>()(
         const idx = state.runBag.findIndex((i) => i.id === itemId);
         if (idx === -1) return;
 
-        const itemToEquip = { ...state.runBag[idx], isProtected: false };
+        const itemToEquip = state.runBag[idx];
         const prevEquipped = state.equipped[itemToEquip.slot];
         const nextBag = [...state.runBag];
 
         if (prevEquipped) {
-          nextBag[idx] = {
-            ...prevEquipped,
-            isProtected: state.runBag[idx].isProtected,
-          };
+          nextBag[idx] = prevEquipped;
         } else {
           nextBag.splice(idx, 1);
         }
@@ -581,16 +648,8 @@ export const useGameStore = create<GameStoreState>()(
         if (!target) return;
 
         const { gold, essence } = getItemSalvageValue(target);
-        let remaining = state.runBag.filter((i) => i.id !== itemId);
-
-        // If the salvaged item was protected, automatically protect the highest-rarity remaining item
-        if (target.isProtected && (state.hubUpgrades.safe_pocket || 0) > 0 && remaining.length > 0) {
-          const best = [...remaining].sort((a, b) => RARITY_RANK[b.rarity] - RARITY_RANK[a.rarity])[0];
-          remaining = remaining.map((i) => ({ ...i, isProtected: i.id === best.id }));
-        }
-
         set({
-          runBag: remaining,
+          ...removeRunItem(state, target),
           runGold: state.runGold + gold,
           runEssence: state.runEssence + essence,
         });
@@ -631,15 +690,9 @@ export const useGameStore = create<GameStoreState>()(
         const target = state.runBag.find((i) => i.id === itemId);
         if (!target) return;
 
-        let remaining = state.runBag.filter((i) => i.id !== itemId);
-        if (target.isProtected && (state.hubUpgrades.safe_pocket || 0) > 0 && remaining.length > 0) {
-          const best = [...remaining].sort((a, b) => RARITY_RANK[b.rarity] - RARITY_RANK[a.rarity])[0];
-          remaining = remaining.map((i) => ({ ...i, isProtected: i.id === best.id }));
-        }
-
         const droppedClean: GameItem = { ...target, isProtected: false };
         set({
-          runBag: remaining,
+          ...removeRunItem(state, target),
           pendingFloorDrops: [...state.pendingFloorDrops, droppedClean],
         });
         state.pushNotification(`Выброшено на пол: ${target.name}`, 'info');
@@ -658,8 +711,10 @@ export const useGameStore = create<GameStoreState>()(
 
       extractToHub: () => {
         const state = get();
+        if (state.mode !== 'dungeon' || !state.extractionPortalOpen) return;
+
         const stats = computePlayerStats(state.equipped, state.hubUpgrades);
-        const cleanedLoot = state.runBag.map((i) => ({ ...i, isProtected: false }));
+        const equipped = withGearProtection(state.equipped);
         const durationSec = Math.max(1, Math.round((Date.now() - state.runStartTime) / 1000));
 
         const summary: RunSummarySnapshot = {
@@ -668,7 +723,7 @@ export const useGameStore = create<GameStoreState>()(
           enemiesSlain: state.runEnemiesSlain,
           goldCollected: state.runGold,
           essenceCollected: state.runEssence,
-          itemsExtracted: cleanedLoot,
+          itemsExtracted: getRunLoot(state).map((item) => ({ ...item, isProtected: false })),
           itemsLost: 0,
           protectedItemSaved: null,
           durationSec,
@@ -685,11 +740,13 @@ export const useGameStore = create<GameStoreState>()(
           nearbyStation: null,
           gold: state.gold + state.runGold,
           essence: state.essence + state.runEssence,
-          stash: [...cleanedLoot, ...state.stash],
+          equipped,
+          stash: [...state.runBag.map((item) => ({ ...item, isProtected: false })), ...state.stash],
           highestWaveReached: Math.max(state.highestWaveReached, state.currentWave),
           totalRunsCompleted: state.totalRunsCompleted + 1,
           playerHp: stats.maxHp,
           playerMaxHp: stats.maxHp,
+          runStartingGear: null,
           runBag: [],
           pendingFloorDrops: [],
           runGold: 0,
@@ -699,7 +756,7 @@ export const useGameStore = create<GameStoreState>()(
         });
       },
 
-      retreatToHub: () => finishRunWithLoss(get(), set, 'retreated', RETREAT_KEEP_RATIO),
+      retreatToHub: () => finishRunWithLoss(get(), set, 'retreated'),
 
       proceedToNextWave: () => {
         const state = get();
@@ -725,7 +782,7 @@ export const useGameStore = create<GameStoreState>()(
         );
       },
 
-      triggerPlayerDefeat: () => finishRunWithLoss(get(), set, 'defeat', DEFEAT_KEEP_RATIO),
+      triggerPlayerDefeat: () => finishRunWithLoss(get(), set, 'defeat'),
 
       returnToHubFromSummary: () => {
         const state = get();
@@ -749,7 +806,7 @@ export const useGameStore = create<GameStoreState>()(
       partialize: (state) => ({
         gold: state.gold,
         essence: state.essence,
-        equipped: state.equipped,
+        equipped: getCarriedStartingGear(state),
         stash: state.stash,
         hubUpgrades: state.hubUpgrades,
         highestWaveReached: state.highestWaveReached,
