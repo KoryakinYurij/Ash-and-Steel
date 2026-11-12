@@ -386,7 +386,7 @@ export const ForgeModal: React.FC = () => {
             <div className="mt-2.5 p-2 rounded bg-slate-900/90 border border-slate-800 text-[11px] text-slate-400 flex items-center gap-2">
               <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
               <span>
-                Тайный Карман автоматически защищает выбранный предмет в рюкзаке вылазки.
+                Тайный Карман защищает одну находку при отступлении или гибели. Вы можете выбрать её в рюкзаке вылазки.
               </span>
             </div>
           </div>

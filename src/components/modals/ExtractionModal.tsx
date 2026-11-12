@@ -13,15 +13,17 @@ import {
 import { getWaveComposition } from '../../data/enemies';
 import { getItemSalvageValue, RARITY_CONFIG } from '../../data/items';
 import { SoundManager } from '../../engine/SoundManager';
-import { useGameStore } from '../../store/useGameStore';
+import { getRunLoot, useGameStore } from '../../store/useGameStore';
 import { ItemIcon } from '../ui/ItemIcon';
 
 export const ExtractionModal: React.FC = () => {
+  const state = useGameStore();
   const {
     currentWave,
     runGold,
     runEssence,
     runBag,
+    runStartingGear,
     playerHp,
     playerMaxHp,
     hubUpgrades,
@@ -33,8 +35,9 @@ export const ExtractionModal: React.FC = () => {
     extractToHub,
     proceedToNextWave,
     setActiveStationModal,
-  } = useGameStore();
+  } = state;
 
+  const lootCount = getRunLoot(state).length;
   const nextWaveComp = getWaveComposition(currentWave + 1);
   const healPct = Math.round((0.25 + (hubUpgrades.healing_well || 0) * 0.08) * 100);
   const commonCount = runBag.filter((i) => i.rarity === 'common' && !i.isProtected).length;
@@ -119,7 +122,7 @@ export const ExtractionModal: React.FC = () => {
                 </span>
                 {(hubUpgrades.safe_pocket || 0) > 0 && (
                   <div className="text-[11px] text-amber-300 flex items-center gap-1 mt-0.5">
-                    <Lock className="w-3 h-3" /> Клик по иконке защищает 1 предмет в Тайном Кармане
+                    <Lock className="w-3 h-3" /> Нажмите на находку, чтобы защитить её Тайным Карманом
                   </div>
                 )}
               </div>
@@ -146,6 +149,7 @@ export const ExtractionModal: React.FC = () => {
               <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
                 {runBag.map((item) => {
                   const salvage = getItemSalvageValue(item);
+                  const isStartingGear = runStartingGear?.[item.slot]?.id === item.id;
                   return (
                     <div
                       key={item.id}
@@ -157,9 +161,10 @@ export const ExtractionModal: React.FC = () => {
                     >
                       <button
                         type="button"
-                        title="Положить в Тайный Карман"
+                        title={isStartingGear ? 'Снаряжение из Цитадели' : 'Положить в Тайный Карман'}
+                        disabled={isStartingGear || !hubUpgrades.safe_pocket}
                         onClick={() => toggleProtectRunItem(item.id)}
-                        className="flex flex-col items-center cursor-pointer w-full"
+                        className="flex flex-col items-center cursor-pointer disabled:cursor-default w-full"
                       >
                         <ItemIcon
                           iconName={item.iconName}
@@ -239,8 +244,8 @@ export const ExtractionModal: React.FC = () => {
                 <span>Эвакуироваться в Хаб</span>
               </div>
               <p className="text-xs text-slate-900 font-medium mt-2 leading-relaxed">
-                Безопасно перенести 100% предметов из рюкзака вылазки ({runBag.length} шт.), всё
-                золото (+{runGold}) и эссенцию (+{runEssence}) в постоянный Сундук Хранилища.
+                Вы вернётесь со всей добычей, включая надетые находки ({lootCount} предм.),
+                и получите всё золото (+{runGold}) и эссенцию (+{runEssence}).
               </p>
               <div className="mt-3 inline-flex items-center gap-1 text-[11px] font-bold uppercase tracking-wider text-emerald-950">
                 <ShieldCheck className="w-3.5 h-3.5" /> Надёжное сохранение добычи

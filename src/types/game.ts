@@ -117,7 +117,7 @@ export interface ComputedPlayerStats {
 }
 
 export interface RunSummarySnapshot {
-  outcome: 'extracted' | 'defeat';
+  outcome: 'extracted' | 'retreated' | 'defeat';
   waveReached: number;
   enemiesSlain: number;
   goldCollected: number;
